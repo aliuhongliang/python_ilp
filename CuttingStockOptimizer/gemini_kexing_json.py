@@ -1,3 +1,6 @@
+
+# 完整版可以替代线上的版本
+
 from ortools.sat.python import cp_model
 import sys
 import time

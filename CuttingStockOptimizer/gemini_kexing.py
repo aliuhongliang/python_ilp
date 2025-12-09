@@ -1,3 +1,5 @@
+# 无头无尾版本 ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+
 # from ortools.sat.python import cp_model
 # import sys
 
@@ -177,6 +179,13 @@
 #     optimizer = CuttingStockOptimizer(L, loss_mm, demands)
 #     optimizer.solve()
 
+
+
+
+
+
+
+# 切头切尾版本 ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
 
 
 from ortools.sat.python import cp_model
