@@ -338,6 +338,41 @@ class SteelCuttingOptimizer:
         print("✔ 调试信息结束\n")
 
 
+        print("\n--- 需求校验（含超产情况） ---")
+        verification = self._verify_demands(bins)
+        for v in verification["details"]:
+            print(f"规格 {v['width']} mm: 需求 {v['demand']} | 实际 {v['actual']} | 满足需求: {v['satisfied']}")
+
+        # 打印超产明细
+        self._print_over_production(verification)
+
+    def _print_over_production(self, verification: Dict):
+        """打印超产明细"""
+        details = verification["details"]
+        over_list = []
+
+        for item in details:
+            width = item["width"]
+            demand = item["demand"]
+            actual = item["actual"]
+            if actual > demand:
+                over_list.append({
+                    "width": width,
+                    "demand": demand,
+                    "actual": actual,
+                    "extra": actual - demand,
+                    "percent": round((actual - demand) / demand * 100, 2) if demand > 0 else 0
+                })
+
+        if not over_list:
+            print("\n✔ 没有出现任何超产情况")
+            return
+
+        print("\n--- 🔥 超产明细（实际切割数量 > 需求） ---")
+        for o in over_list:
+            print(f"规格 {o['width']} mm | 需求 {o['demand']} | 实际 {o['actual']} | "
+                  f"超产 {o['extra']} | 超产比例 {o['percent']}%")
+
 def optimize_cutting(L: int, demands: List[List[int]], loss_mm: int = 5, 
                      head_cut: int = 0, tail_cut: int = 0) -> str:
     """
