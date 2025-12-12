@@ -96,6 +96,7 @@
         123,
         123
       ],
+      "cutting_list_str": "123*48",
       "total_length": 5904,
       "cutting_times": 47,
       "cutting_loss": 94,
@@ -158,6 +159,7 @@
         92,
         92
       ],
+      "cutting_list_str": "1145*1 + 143*3 + 92*47",
       "total_length": 5898,
       "cutting_times": 50,
       "cutting_loss": 100,
@@ -183,6 +185,7 @@
         123,
         123
       ],
+      "cutting_list_str": "1145*4 + 143*8 + 123*2",
       "total_length": 5970,
       "cutting_times": 13,
       "cutting_loss": 26,
@@ -236,6 +239,7 @@
         123,
         92
       ],
+      "cutting_list_str": "143*39 + 123*2 + 92*1",
       "total_length": 5915,
       "cutting_times": 41,
       "cutting_loss": 82,
@@ -280,6 +284,7 @@
         92,
         92
       ],
+      "cutting_list_str": "192*29 + 92*4",
       "total_length": 5936,
       "cutting_times": 32,
       "cutting_loss": 64,
@@ -301,6 +306,7 @@
         92,
         92
       ],
+      "cutting_list_str": "1092*5 + 123*2 + 92*3",
       "total_length": 5982,
       "cutting_times": 9,
       "cutting_loss": 18,
@@ -328,6 +334,7 @@
         92,
         92
       ],
+      "cutting_list_str": "1145*4 + 143*5 + 123*1 + 92*6",
       "total_length": 5970,
       "cutting_times": 15,
       "cutting_loss": 30,
@@ -382,6 +389,7 @@
         92,
         92
       ],
+      "cutting_list_str": "143*36 + 123*4 + 92*3",
       "total_length": 5916,
       "cutting_times": 42,
       "cutting_loss": 84,
@@ -454,6 +462,7 @@
         92,
         92
       ],
+      "cutting_list_str": "143*1 + 123*7 + 92*53",
       "total_length": 5880,
       "cutting_times": 60,
       "cutting_loss": 120,
@@ -512,6 +521,7 @@
         123,
         92
       ],
+      "cutting_list_str": "192*2 + 143*1 + 123*43 + 92*1",
       "total_length": 5908,
       "cutting_times": 46,
       "cutting_loss": 92,

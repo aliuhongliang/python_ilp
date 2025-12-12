@@ -321,9 +321,13 @@ class ColumnGenSetsOptimizer:
         pattern_id = 1
         for p, cnt in usage.items():
             cutting_list = []
+            cutting_list_str_parts = []
             for i, k in enumerate(p):
                 cutting_list += [self.lengths[i]] * k
+                if k > 0:
+                    cutting_list_str_parts.append(f"{self.lengths[i]}*{k}")
             cutting_list.sort(reverse=True)
+            cutting_list_str = " + ".join(cutting_list_str_parts)
 
             total_len = sum(cutting_list)
             cut_times = max(0, len(cutting_list)-1)
@@ -335,6 +339,7 @@ class ColumnGenSetsOptimizer:
                 "pattern_id": pattern_id,
                 "count": cnt,
                 "cutting_list": cutting_list,
+                "cutting_list_str": cutting_list_str,   # 新增字段
                 "total_length": total_len,
                 "cutting_times": cut_times,
                 "cutting_loss": pattern_cut_loss,
