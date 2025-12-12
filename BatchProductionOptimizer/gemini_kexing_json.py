@@ -1,357 +1,352 @@
-from ortools.sat.python import cp_model
-import sys
-import time
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+列生成 + 最终整数求解（针对“多少套”问题）实现
+保存为 cut_sets_column_generation.py 并运行
+依赖: pip install pulp
+"""
+
+import math
 import json
-from collections import defaultdict
+from collections import Counter
+import sys
 
-# 增加 Python 递归深度
-sys.setrecursionlimit(3000) 
+try:
+    from pulp import (
+        LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, PULP_CBC_CMD, LpContinuous, LpInteger
+    )
+except Exception:
+    print("需要安装 pulp: pip install pulp")
+    raise
 
-class BatchProductionOptimizer:
-    def __init__(self, raw_length_m: float, head_cut: int, tail_cut: int, loss_mm: int, demands: list, max_bars: int):
-        """
-        初始化优化器
-        :param raw_length_m: 母材长度 (米) -> 转换为毫米
-        :param head_cut: 切头长度 (毫米)
-        :param tail_cut: 去尾长度 (毫米)
-        :param loss_mm: 锯缝损耗 (毫米)
-        :param demands: 零件规格及每套需求量 [[y1, x1], [y2, x2], ...]
-        :param max_bars: 现有母材总根数 (X)
-        """
-        self.L_raw = int(raw_length_m * 1000) # 转换为毫米
-        self.head_cut = head_cut
-        self.tail_cut = tail_cut
-        self.loss = loss_mm
-        self.demands_per_batch = demands
-        self.max_bars = max_bars
-        
-        # 计算每根母材的有效可用长度
-        self.L_effective = self.L_raw - self.head_cut - self.tail_cut
-        
-        if self.L_effective <= 0:
-            raise ValueError(f"错误：有效长度 ({self.L_effective}mm) 小于等于零。请检查切头/去尾参数是否过大。")
+class ColumnGenSetsOptimizer:
+    def __init__(self, y_meters, a_head, b_tail, c_loss, specs, available_bars,
+                 max_cg_iters=200, tol=1e-6):
+        self.y_meters = float(y_meters)
+        self.a = int(a_head)
+        self.b = int(b_tail)
+        self.c = int(c_loss)
+        self.specs = [(int(l), int(q)) for l, q in specs]
+        self.specs.sort(key=lambda t: t[0], reverse=True)
+        self.lengths = [s[0] for s in self.specs]
+        self.per_set = [s[1] for s in self.specs]
+        self.n = len(self.specs)
+        self.available = int(available_bars)
+        self.L = int(round(self.y_meters * 1000)) - self.a - self.b
+        if self.L <= 0:
+            raise ValueError("有效长度 L <= 0，请检查参数")
+        # capacity transform: use capacity = L + c, item weight = length + c
+        self.cap = self.L + self.c
+        # max pieces of type i per bar
+        self.max_per = [(self.L + self.c) // (l + self.c) if l>0 else 0 for l in self.lengths]
 
-        self.item_widths = [d[0] for d in demands]   # 零件宽度 y1, y2, ...
-        self.required_per_batch = [d[1] for d in demands] # 每套需求的数量 x1, x2, ...
-        self.num_items = len(self.demands_per_batch)
-        
-        self.patterns = []
-        self.MAX_PATTERNS = 10000 
-        self._patterns_generated_count = 0 
-        
-        self.result_vars = {} 
+        self.max_cg_iters = max_cg_iters
+        self.tol = tol
 
-    # --- 模式生成和计算辅助函数 (与之前一致) ---
-    def _calculate_pattern_length(self, pattern: list) -> int:
-        """计算一个模式消耗的总长度（只计算零件和切缝损耗）"""
-        total_pieces = sum(pattern)
-        if total_pieces == 0:
-            return 0
-        material_len = sum(pattern[i] * self.item_widths[i] for i in range(len(pattern)))
-        waste_len = (total_pieces - 1) * self.loss if total_pieces > 0 else 0
-        return material_len + waste_len
-
-    def _generate_patterns_recursive(self, current_pattern: list):
-        if self._patterns_generated_count >= self.MAX_PATTERNS: return
-        added = False
-        start_index = 0
-        for i in range(len(current_pattern) - 1, -1, -1):
-            if current_pattern[i] > 0:
-                start_index = i
-                break
-                
-        for i in range(start_index, self.num_items):
-            temp_pattern = list(current_pattern)
-            temp_pattern[i] += 1
-            if self._calculate_pattern_length(temp_pattern) <= self.L_effective: 
-                self._generate_patterns_recursive(temp_pattern)
-                added = True
-        
-        if not added and sum(current_pattern) > 0:
-            self._patterns_generated_count += 1
-            self.patterns.append(current_pattern)
-            
-            # 实时进度打印，仅用于调试
-            if self._patterns_generated_count % 500 == 0:
-                sys.stdout.write(f"\r正在生成可行切割模式... 已找到 {self._patterns_generated_count} 个")
-                sys.stdout.flush()
-
-    def generate_all_patterns(self):
-        sys.stdout.write("正在生成可行切割模式...")
-        sys.stdout.flush()
-        initial_pattern = [0] * self.num_items
-        self._generate_patterns_recursive(initial_pattern)
-        sys.stdout.write(f"\r正在生成可行切割模式... 完成。共找到 {len(self.patterns)} 种可行模式。\n")
-        sys.stdout.flush()
-
-        unique_patterns = []
+    # 初始列：每种单规格的最大重复 + 一些贪心组合
+    def initial_patterns(self):
+        pats = []
+        # single-type max repeats
+        for i, l in enumerate(self.lengths):
+            k = self.max_per[i]
+            if k > 0:
+                vec = [0]*self.n
+                vec[i] = k
+                pats.append(tuple(vec))
+        # 贪心：按长度降序填充
+        for start in range(self.n):
+            vec = [0]*self.n
+            rem = self.cap
+            for i in range(start, self.n):
+                w = self.lengths[i] + self.c
+                if w <= 0: continue
+                k = rem // w
+                if k > 0:
+                    vec[i] = int(min(k, self.max_per[i]))
+                    rem -= vec[i] * w
+            if sum(vec) > 0:
+                pats.append(tuple(vec))
+        # 去重
+        uniq = []
         seen = set()
-        for p in self.patterns:
-            t = tuple(p)
-            if t not in seen:
-                seen.add(t)
-                unique_patterns.append(p)
-        self.patterns = unique_patterns
-        
-        if not self.patterns:
-            raise ValueError("未找到任何可行的切割模式。请检查输入参数。")
+        for p in pats:
+            if p not in seen:
+                seen.add(p)
+                uniq.append(p)
+        return uniq
 
-    # --- 核心求解方法 (目标函数修改) ---
-    def solve(self) -> dict:
-        start_time = time.time()
-        
-        try:
-            self.generate_all_patterns()
-        except ValueError as e:
-            return {"success": False, "message": str(e)}
+    # 将 pattern tuple(counts) -> 真实长度 list
+    def pattern_to_list(self, p):
+        lst = []
+        for i, c in enumerate(p):
+            lst += [self.lengths[i]] * c
+        return lst
 
-        model = cp_model.CpModel()
-        
-        # 1. 变量定义
-        
-        # x[j]: 第 j 种模式使用的次数 (上界为最大母材数)
-        x = [model.NewIntVar(0, self.max_bars, f'pattern_count_{j}') 
-             for j in range(len(self.patterns))]
-        
-        # K: 生产的总套数 (整数变量)
-        # 上界：粗略估计，最少需求零件的最大值 / 最大零件需求量
-        max_total_demand = sum(self.required_per_batch) * self.max_bars # 粗略上界
-        K = model.NewIntVar(0, max_total_demand, 'batch_count_K')
-        
-        # 2. 约束条件
-        
-        # 约束 A: 使用的母材总数不能超过现有数量
-        model.Add(sum(x) <= self.max_bars)
-        
-        # 约束 B: 生产的每种零件数量必须满足 K 套的要求
-        # Sum(模式j中包含零件i的数量 * 模式j的使用次数) >= K * (零件i的每套需求量)
-        for i in range(self.num_items):
-            # 零件 i 的实际产出总数 (Actual Production)
-            actual_production_i = sum(self.patterns[j][i] * x[j] for j in range(len(self.patterns)))
-            
-            # 约束：实际产出 >= K * 需求量
-            required_i = K * self.required_per_batch[i] # 这是一个线性表达式
-            model.Add(actual_production_i >= required_i)
+    # solve knapsack subproblem (integer) to maximize sum(dual[i] * count_i)
+    # subject to sum((length_i + c) * count_i) <= cap and 0<=count_i<=max_per[i]
+    # returns best_count_vector and best_value
+    def knapsack_dp(self, duals):
+        cap = self.cap
+        n = self.n
+        weights = [l + self.c for l in self.lengths]
+        # DP: dp[w] = best value; keep parent for reconstruct
+        # But we also need to enforce per-item max counts; implement bounded knapsack by binary-splitting each item
+        # Build items list of (weight, value, orig_index, multiplicity_unit)
+        items = []
+        for i in range(n):
+            mi = self.max_per[i]
+            if mi <= 0: continue
+            v = duals[i]
+            w = weights[i]
+            # binary split
+            k = 1
+            rem = mi
+            while rem > 0:
+                take = min(k, rem)
+                items.append((w * take, v * take, i, take))
+                rem -= take
+                k *= 2
 
-        # 3. 目标函数：最大化生产的总套数 K
-        model.Maximize(K)
+        # dp arrays
+        dp = [-1e100] * (cap + 1)
+        dp[0] = 0.0
+        parent = [None] * (cap + 1)  # store (prev_w, item_idx)
+        item_used = [None] * (cap + 1)
+        for idx, (wt, val, iidx, mult) in enumerate(items):
+            wt = int(wt)
+            # traverse backwards
+            for cur in range(cap, wt - 1, -1):
+                prev = cur - wt
+                if dp[prev] + val > dp[cur] + 1e-12:
+                    dp[cur] = dp[prev] + val
+                    parent[cur] = prev
+                    item_used[cur] = idx
+        # find best weight
+        best_w = max(range(cap + 1), key=lambda w: dp[w])
+        best_val = dp[best_w]
+        if best_val < -1e50:
+            return [0]*n, 0.0
+        # reconstruct counts
+        counts = [0]*n
+        cur = best_w
+        while cur != 0 and parent[cur] is not None:
+            idx = item_used[cur]
+            it = items[idx]
+            counts[it[2]] += it[3]
+            cur = parent[cur]
+        return counts, best_val
 
-        # 4. 求解
-        solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 30.0 
-        status = solver.Solve(model)
-        
-        end_time = time.time()
-        
-        # 5. 结果处理
-        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            return {
-                "success": False, 
-                "message": f"未找到最优解。求解状态: {solver.StatusName(status)}。请检查输入参数或尝试增加求解时间限制。"
-            }
-        
-        # 缓存求解结果变量
-        self.result_vars = {
-            "total_batches_K": solver.Value(K),
-            "solver": solver,
-            "pattern_counts": [solver.Value(var) for var in x],
-            "total_bars": int(sum(solver.Value(var) for var in x)), # 实际使用了多少根母材
-            "solve_time": end_time - start_time
-        }
-        
-        return self._format_results_to_json()
+    # Solve LP master given current patterns (columns)
+    def solve_master_lp(self, patterns, targets):
+        # patterns: list of tuples length n
+        m = len(patterns)
+        prob = LpProblem("Master_LP", LpMinimize)
+        x = [LpVariable(f"x_{j}", lowBound=0, cat=LpContinuous) for j in range(m)]
+        prob += lpSum(x)
+        # constraints for each type
+        cons = []
+        for i in range(self.n):
+            prob += lpSum(x[j] * patterns[j][i] for j in range(m)) >= targets[i], f"dem_{i}"
+        solver = PULP_CBC_CMD(msg=0)
+        prob.solve(solver)
+        if prob.status != 1:
+            return None, None, None  # infeasible or failed
+        xvals = [v.varValue for v in x]
+        # extract duals
+        duals = []
+        for i in range(self.n):
+            cname = f"dem_{i}"
+            # pulp stores constraints in prob.constraints
+            pi = prob.constraints[cname].pi if hasattr(prob.constraints[cname], 'pi') else prob.constraints[cname].pi
+            duals.append(pi)
+        obj = sum(xvals)
+        return obj, xvals, duals
 
+    # Solve integer master (min bars) with given patterns
+    def solve_master_int(self, patterns, targets):
+        m = len(patterns)
+        prob = LpProblem("Master_INT", LpMinimize)
+        x = [LpVariable(f"x_{j}", lowBound=0, cat=LpInteger) for j in range(m)]
+        prob += lpSum(x)
+        for i in range(self.n):
+            prob += lpSum(x[j] * patterns[j][i] for j in range(m)) >= targets[i], f"dem_{i}"
+        solver = PULP_CBC_CMD(msg=0)
+        prob.solve(solver)
+        if prob.status != 1:
+            return math.inf, {}
+        usage = {patterns[j]: int(x[j].varValue) for j in range(m) if int(x[j].varValue) > 0}
+        total_bars = sum(usage.values())
+        return total_bars, usage
 
-    # --- 结果格式化为 JSON 对象 (适应新的统计目标) ---
-    def _format_results_to_json(self) -> dict:
-        solver = self.result_vars['solver']
-        total_bars = self.result_vars['total_bars']
-        pattern_counts = self.result_vars['pattern_counts']
-        total_batches_K = self.result_vars['total_batches_K']
-        
-        # 临时统计变量
-        actual_production = defaultdict(int)
-        summary_plan = []
-        total_used_length_in_effective = 0
-        total_internal_waste = 0
-        total_cutting_loss = 0
-        pattern_id_counter = 0
+    # The main: maximize complete sets via binary search + column generation per feasibility test
+    def maximize_sets(self):
+        # compute upper bound quickly
+        upper_candidates = []
+        for i in range(self.n):
+            if self.per_set[i] > 0:
+                upper_candidates.append((self.available * self.max_per[i]) // self.per_set[i])
+        if upper_candidates:
+            hi = min(upper_candidates)
+        else:
+            hi = 0
+        denom = sum(l*q for l,q in zip(self.lengths, self.per_set))
+        if denom > 0:
+            hi2 = (self.available * self.L) // denom
+            hi = min(hi, hi2)
+        hi = max(hi, 0)
+        lo = 0
+        best = 0
+        best_usage = {}
+        # binary search
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            targets = [mid * q for q in self.per_set]
+            print(f"  ↳ 检验套数 {mid} ... ", end='', flush=True)
+            feasible, bars_needed, usage = self._feasible_by_column_generation(targets)
+            if feasible and bars_needed <= self.available:
+                print(f"可行，需要 {bars_needed} 根")
+                best = mid
+                best_usage = usage
+                lo = mid + 1
+            else:
+                print(f"不可行 (需要 {bars_needed} 根)" if bars_needed<math.inf else "不可行 (无解)")
+                hi = mid - 1
+        # final best usage
+        return best, best_usage
 
-        for j in range(len(self.patterns)):
-            count = pattern_counts[j]
-            if count > 0:
-                pattern_id_counter += 1
-                pat = self.patterns[j]
-                
-                used_len_in_pattern = self._calculate_pattern_length(pat)
-                internal_waste_per_bar = self.L_effective - used_len_in_pattern 
-                total_pieces = sum(pat)
-                cutting_times = total_pieces - 1 if total_pieces > 0 else 0
-                cutting_loss_per_bar = cutting_times * self.loss
-                
-                # 统计数据累加
-                total_used_length_in_effective += used_len_in_pattern * count
-                total_internal_waste += internal_waste_per_bar * count
-                total_cutting_loss += cutting_loss_per_bar * count
-                
-                # 汇总切割清单
-                cutting_list_raw = []
-                for i, num in enumerate(pat):
-                    if num > 0:
-                        width = self.item_widths[i]
-                        actual_production[width] += num * count
-                        cutting_list_raw.extend([width] * num)
-                
-                cutting_list_raw.sort(reverse=True)
-                utilization = round((used_len_in_pattern / self.L_effective) * 100, 2)
-                
-                summary_plan.append({
-                    "pattern_id": pattern_id_counter,
-                    "count": count,
-                    "cutting_list": cutting_list_raw,
-                    "total_length": used_len_in_pattern, 
-                    "cutting_times": cutting_times,
-                    "cutting_loss": cutting_loss_per_bar,
-                    "waste": internal_waste_per_bar,
-                    "utilization": utilization
-                })
-        
-        # --- 2. demand_verification (验证实际生产是否达到 K 套) ---
-        demand_details = []
-        all_satisfied = True
-        for i in range(self.num_items):
-            width = self.item_widths[i]
-            demand_per_batch = self.required_per_batch[i]
-            required_total = total_batches_K * demand_per_batch
-            actual = actual_production[width]
-            
-            satisfied = actual >= required_total
-            if not satisfied:
-                all_satisfied = False
-                
-            demand_details.append({
-                "width": width, 
-                "demand_per_batch": demand_per_batch,
-                "required_total": required_total,
-                "actual": actual, 
-                "satisfied": satisfied
-            })
-            
-        demand_verification = {
-            "all_satisfied": all_satisfied, # 理论上K是最优解时这里应为True
-            "batches_produced": total_batches_K,
-            "details": demand_details
-        }
-        
-        # --- 3. detail_plan (使用实际使用的 total_bars 来创建) ---
-        detail_plan = []
-        bar_number_counter = 1
-        for plan in summary_plan:
-            for _ in range(plan['count']):
-                detail_plan.append({
-                    "bar_number": bar_number_counter,
-                    "original_length": self.L_raw,
-                    "head_cut": self.head_cut,
-                    "tail_cut": self.tail_cut,
-                    "effective_length": self.L_effective,
-                    "cutting_list": plan['cutting_list'],
-                    "total_used": plan['total_length'],
-                    "cutting_times": plan['cutting_times'],
-                    "cutting_loss": plan['cutting_loss'],
-                    "waste": plan['waste'],
-                    "utilization": plan['utilization']
-                })
-                bar_number_counter += 1
+    def _feasible_by_column_generation(self, targets):
+        # initialize patterns
+        patterns = list(self.initial_patterns())
+        # ensure patterns are tuples length n
+        patterns = [tuple(p) for p in patterns]
+        # limit iterations
+        iters = 0
+        while True:
+            iters += 1
+            if iters > self.max_cg_iters:
+                print("（列生成迭代到达上限）", end=' ')
+                break
+            # solve master LP
+            lp_obj, xvals, duals = self.solve_master_lp(patterns, targets)
+            if lp_obj is None:
+                return False, math.inf, {}
+            # compute reduced cost subproblem: maximize sum(dual[i]*count_i) - 1
+            counts, val = self.knapsack_dp(duals)
+            reduced_cost = val - 1.0
+            # debug
+            # print(f" iter {iters} lp_obj {lp_obj:.4f} sub_val {val:.6f} reduced_cost {reduced_cost:.6f}")
+            if reduced_cost <= self.tol:
+                # LP optimal wrt available columns
+                break
+            # else add new pattern counts (but ensure bounded by max_per)
+            new_pat = tuple(min(counts[i], self.max_per[i]) for i in range(self.n))
+            if sum(new_pat) == 0:
+                break
+            if new_pat not in patterns:
+                patterns.append(new_pat)
+            else:
+                # cannot improve
+                break
+        # now solve integer master with current patterns
+        bars_needed, usage = self.solve_master_int(patterns, targets)
+        feasible = (bars_needed <= self.available)
+        return feasible, bars_needed, usage
 
-        # --- 4. statistics ---
-        total_effective_length = total_bars * self.L_effective
-        utilization = round((total_used_length_in_effective / total_effective_length) * 100, 2)
-        total_head_tail_cut = total_bars * (self.head_cut + self.tail_cut)
-        
-        statistics = {
-            "max_available_bars": self.max_bars,
-            "actual_bars_used": total_bars,
-            "total_batches_produced": total_batches_K, # 新增
-            "utilization": utilization,
-            "total_waste": total_internal_waste,
-            "total_cutting_loss": total_cutting_loss,
-            "total_head_tail_cut": total_head_tail_cut,
-            "solver_time_seconds": round(self.result_vars['solve_time'], 4)
-        }
-        
-        # --- 5. parameters ---
-        parameters = {
-            "raw_length_m": self.L_raw / 1000,
-            "original_length": self.L_raw,
-            "effective_length": self.L_effective,
-            "head_cut": self.head_cut,
-            "tail_cut": self.tail_cut,
-            "cutting_loss": self.loss,
-            "demands_per_batch": self.demands_per_batch
-        }
+    # helper to expand usage into bins and stats
+    def expand_usage_to_bins(self, usage):
+        bins = []
+        for p, cnt in usage.items():
+            for _ in range(cnt):
+                lst = []
+                for i,k in enumerate(p):
+                    lst += [self.lengths[i]] * k
+                bins.append(sorted(lst, reverse=True))
+        return bins
 
-        # --- 6. Final JSON Output ---
-        return {
+    def solve_and_report(self):
+        print("="*80)
+        print("使用 列生成 + 最终整数求解（比全枚举更快）")
+        print(f"母材原长 {self.y_meters} m -> 有效 L = {self.L} mm，刀损 c = {self.c} mm")
+        print(f"规格: {self.specs}")
+        print(f"可用母材: {self.available}")
+        # binary search maximize
+        best_sets, usage = self.maximize_sets()
+        # expand
+        bins = self.expand_usage_to_bins(usage)
+        # stats
+        total_bars = len(bins)
+        total_used = sum(sum(b) for b in bins)
+        total_loss = sum((len(b)-1) * self.c for b in bins)
+        total_waste = sum(max(0, self.L - sum(b) - max(0, len(b)-1)*self.c) for b in bins)
+        util = (total_used / (total_bars * self.L) * 100) if total_bars>0 else 0
+        print("="*80)
+        print(f"结果: 最大完整套数 = {best_sets}")
+        print(f"最优使用母材数（近似/最终整数解）= {total_bars}")
+        print(f"利用率 = {round(util,2)}%  切损总和 = {total_loss} mm  总浪费 = {total_waste} mm")
+        print("模式使用：")
+        for i,(p,cnt) in enumerate(usage.items(),1):
+            parts = []
+            for t_idx, k in enumerate(p):
+                if k>0:
+                    parts.append(f"{self.lengths[t_idx]}×{k}")
+            print(f" 模式{i}: {' + '.join(parts)}  用 {cnt} 次")
+
+        # verification
+        produced = Counter()
+        for b in bins:
+            for item in b: produced[item] += 1
+        verify_details = []
+        all_ok = True
+        for idx,l in enumerate(self.lengths):
+            actual = produced.get(l,0)
+            req = best_sets * self.per_set[idx]
+            ok = actual >= req
+            if not ok: all_ok = False
+            verify_details.append({"length_mm": l, "actual_total": actual, "required_total_for_sets": req, "satisfied": ok})
+
+        result = {
             "success": True,
-            "message": f"求解成功，最多可生产 {total_batches_K} 套零件，使用了 {total_bars} 根母材。",
-            "parameters": parameters,
-            "statistics": statistics,
-            "summary_plan": summary_plan,
-            "detail_plan": detail_plan,
-            "demand_verification": demand_verification
+            "parameters": {
+                "mother_length_m": self.y_meters,
+                "effective_length_mm": self.L,
+                "head_cut_mm": self.a,
+                "tail_cut_mm": self.b,
+                "cut_loss_mm": self.c,
+                "specs": [{"length_mm": l, "count_per_set": q} for l,q in self.specs],
+                "available_bars": self.available
+            },
+            "total_complete_sets": best_sets,
+            "statistics": {
+                "total_bars_used": total_bars,
+                "total_used_mm": total_used,
+                "total_cut_loss_mm": total_loss,
+                "total_waste_mm": total_waste,
+                "utilization_percent": round(util,2)
+            },
+            "patterns_usage": [
+                {"pattern_counts": {str(self.lengths[i]): p[i] for i in range(self.n)}, "count": cnt}
+                for p,cnt in usage.items()
+            ],
+            "bins": [{"bar_number": i+1, "cutting_list": b} for i,b in enumerate(bins)],
+            "verification": {"all_satisfied": all_ok, "details": verify_details}
         }
+        return result
 
-
-# ========================================================================
-# --- 控制台打印和文件输出模块 ---
-# ========================================================================
-def print_summary_to_console(stats, summary_plan):
-    """精简打印核心统计信息和汇总方案到控制台"""
-    
-    print("\n" + "=" * 50)
-    print("🚀 批量生产优化结果摘要 (Summary) 🚀")
-    print("=" * 50)
-    
-    # 打印统计信息
-    print("## 📊 总体统计 (Statistics)")
-    print("-" * 50)
-    print(f"| {'项目':<25} | {'数值':<20} |")
-    print("-" * 50)
-    print(f"| {'最大可生产套数':<25} | {stats['total_batches_produced']:<20} |")
-    print(f"| {'实际使用原材料根数':<25} | {stats['actual_bars_used']:<20} |")
-    print(f"| {'总体材料利用率':<25} | {stats['utilization']:.2f}%{'':<18} |")
-    print("-" * 50)
-    
-    # 打印汇总切割方案
-    print("\n## 🔪 汇总切割方案 (Summary Plan)")
-    print("-" * 85)
-    header = f"| {'ID':<4} | {'根数':<6} | {'利用率%':<8} | {'模式内余料':<10} | {'切割清单 (规格*数量)':<45} |"
-    print(header)
-    print("-" * 85)
-    
-    for plan in summary_plan:
-        item_counts = defaultdict(int)
-        for w in plan['cutting_list']:
-            item_counts[w] += 1
-        
-        cut_str = ", ".join([f"{w}*{c}" for w, c in item_counts.items()])
-        
-        row = f"| {plan['pattern_id']:<4} | {plan['count']:<6} | {plan['utilization']:.2f}{'':<6} | {plan['waste']:<10} | {cut_str:<45} |"
-        print(row)
-
-    print("-" * 85)
-
-# --- 运行示例 ---
+# Example usage:
 if __name__ == "__main__":
-    # === 🚨 用户自定义输入区域 🚨 ===
-    raw_length_m = 6.0         # 母材长度：y 米 (6米)
-    head_cut = 50              # 切头损耗 (a 毫米)
-    tail_cut = 30              # 去尾损耗 (b 毫米)
-    loss_mm = 5                # 锯缝损耗 (c 毫米)
-    max_bars = 100             # 现有母材数量 (x 根)
-    
-    # 零件规格及每套需求量 (y1 毫米, x1 根)
-    demands_input = [         
+    # 你原来的示例参数
+    y = 6.0
+    a = 0
+    b = 0
+    c = 2
+    # specs = [
+    #     (1596, 1),
+    #     (851, 1),
+    #     (123, 1),
+    #     (65, 1),
+    #     (50, 1)
+    # ]
+    specs = [         
         [143, 104],   # 每套需要 1430mm 零件 1 根
         [123, 202],   # 每套需要 1230mm 零件 2 根
         [1145, 17],   # 每套需要 1145mm 零件 1 根
@@ -359,28 +354,12 @@ if __name__ == "__main__":
         [92, 210],    # 每套需要 1092mm 零件 2 根
         [192, 21]    # 每套需要 1092mm 零件 2 根
     ]
-    # === 🚨 结束输入区域 🚨 ===
+    x_bars = 100
 
-    OUTPUT_FILENAME = "batch_optimization_result.json"
-
-    # 执行计算
-    optimizer = BatchProductionOptimizer(raw_length_m, head_cut, tail_cut, loss_mm, demands_input, max_bars)
-    result_json = optimizer.solve()
-
-    if result_json.get("success"):
-        # 1. 写入文件
-        try:
-            with open(OUTPUT_FILENAME, 'w', encoding='utf-8') as f:
-                json.dump(result_json, f, indent=2, ensure_ascii=False)
-            print(f"\n✅ 完整结果已成功写入文件：{OUTPUT_FILENAME}")
-        except Exception as e:
-            print(f"\n❌ 文件写入失败：{e}")
-
-        # 2. 精简打印到控制台
-        stats = result_json['statistics']
-        summary_plan = result_json['summary_plan']
-        print_summary_to_console(stats, summary_plan)
-        
-    else:
-        print(f"\n❌ 求解失败：{result_json.get('message', '未知错误')}")
-        print(json.dumps(result_json, indent=2, ensure_ascii=False))
+    opt = ColumnGenSetsOptimizer(y, a, b, c, specs, x_bars)
+    res = opt.solve_and_report()
+    print("\n== JSON 输出 ==\n")
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    with open("sets_cut_columngen_result.json", "w", encoding="utf-8") as f:
+        f.write(json.dumps(res, ensure_ascii=False, indent=2))
+    print("\n结果已保存到 sets_cut_columngen_result.json")
