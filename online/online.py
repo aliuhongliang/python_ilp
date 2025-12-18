@@ -26,7 +26,15 @@ class SteelCuttingOptimizer:
          - max_combo_widths: 每个模式允许组合的不同宽度种类数（默认4）
          - keep_top_patterns: 最终保留的高利用率模式数上限
          - enum_limit: 枚举组合时的总枚举上限（防止爆炸）
+
+         参数单位均为 mm
+        L          母材原始长度 (mm)
+        head_cut        去头 (mm)
+        tail_cut        去尾 (mm)
+        loss_mm        每刀损耗 (mm)
+        demands         [(length_mm, count_per_set), ...]
         """
+
         self.L_original = L  # 原始长度
         self.head_cut = head_cut
         self.tail_cut = tail_cut

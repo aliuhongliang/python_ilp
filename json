@@ -27,7 +27,8 @@
   "utilization": 90.36,           // 材料利用率 (%)，仅计算有效长度部分
   "total_waste": 12500,           // 总浪费长度 (mm)，指有效长度内的剩余
   "total_cutting_loss": 2250,     // 总切割损耗 (mm) = 所有切割次数 × cutting_loss
-  "total_head_tail_cut": 12000    // 去头去尾总损耗 (mm) = (head_cut + tail_cut) × total_bars
+  "total_head_tail_cut": 12000,    // 去头去尾总损耗 (mm) = (head_cut + tail_cut) × total_bars
+  "total_complete_sets": 10       //完整满足需求的套数                                              -------  如果是算多少套的话，就加上这一行
 }
 total_bars: 最优方案需要多少根原材料
 utilization: 有效材料利用率 = (实际使用长度 / 有效总长度) × 100%
@@ -41,6 +42,7 @@ summary_plan (汇总切割方案)
     "pattern_id": 1,              // 方案编号
     "count": 50,                  // 这种方案使用了多少根原材料
     "cutting_list": [1430, 1430, 1430, 1092],  // 切割清单（从大到小排序）
+    "cutting_list_str": "1430 * 2 + 1092 * 1", // 切割清单的字符串表示
     "total_length": 5382,         // 这个方案切出的总长度 (mm)
     "cutting_times": 3,           // 需要切割的次数（4段需要切3刀）
     "cutting_loss": 15,           // 切割损耗 (mm) = cutting_times × 5
